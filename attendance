@@ -1,0 +1,705 @@
+<?php
+require_once 'db.php';
+
+// Check if user is logged in
+requireLogin();
+
+$userId = $_SESSION['user_id'];
+$userName = $_SESSION['name'];
+$userRole = $_SESSION['role'];
+$message = '';
+$error = '';
+
+// Get classes based on user role
+$classes = getTeacherClasses($pdo, $userId);
+
+// Get selected class and date
+$selected_class = $_GET['class'] ?? ($classes[0]['id'] ?? null);
+$selected_date = $_GET['date'] ?? date('Y-m-d');
+
+// Handle attendance submission
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_attendance'])) {
+    try {
+        $pdo->beginTransaction();
+        
+        foreach ($_POST['attendance'] as $student_id => $status) {
+            saveAttendance(
+                $pdo,
+                $student_id,
+                $selected_class,
+                $userId,
+                $selected_date,
+                $status,
+                $_POST['notes'][$student_id] ?? ''
+            );
+        }
+        
+        $pdo->commit();
+        $message = "Absensi berhasil disimpan!";
+    } catch (Exception $e) {
+        $pdo->rollBack();
+        $error = "Gagal menyimpan absensi: " . $e->getMessage();
+        logError("Error saving attendance", ['error' => $e->getMessage()]);
+    }
+}
+
+// Get students for selected class with their attendance status
+if ($selected_class) {
+    $stmt = $pdo->prepare("
+        SELECT 
+            s.id, s.nis, s.name, s.gender,
+            a.attendance_status, a.notes
+        FROM students s
+        LEFT JOIN attendance a ON s.id = a.student_id 
+            AND a.class_id = ? 
+            AND a.attendance_date = ?
+        WHERE s.class_id = ? AND s.status = 'active'
+        ORDER BY s.name
+    ");
+    $stmt->execute([$selected_class, $selected_date, $selected_class]);
+    $students = $stmt->fetchAll();
+
+    // Get class info
+    $stmt = $pdo->prepare("SELECT class_name FROM classes WHERE id = ?");
+    $stmt->execute([$selected_class]);
+    $class_info = $stmt->fetch();
+}
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Absensi Kelas - Sistem Absensi Sekolah</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        /* Base Styles */
+        :root {
+            --primary-color: #4a90e2;
+            --secondary-color: #f5f6fa;
+            --success-color: #2ecc71;
+            --warning-color: #f1c40f;
+            --danger-color: #e74c3c;
+            --info-color: #3498db;
+            --text-color: #2c3e50;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background-color: var(--secondary-color);
+            min-height: 100vh;
+            display: flex;
+        }
+
+        /* Sidebar Styles */
+        .sidebar {
+            width: 260px;
+            background: white;
+            box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+            padding: 20px;
+            position: fixed;
+            height: 100vh;
+            overflow-y: auto;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: var(--primary-color);
+            margin-bottom: 30px;
+            padding: 10px;
+        }
+
+        .nav-menu {
+            list-style: none;
+        }
+
+        .nav-item {
+            margin-bottom: 5px;
+        }
+
+        .nav-link {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 15px;
+            text-decoration: none;
+            color: var(--text-color);
+            border-radius: 8px;
+            transition: all 0.3s ease;
+        }
+
+        .nav-link:hover, .nav-link.active {
+            background-color: #eef2ff;
+            color: var(--primary-color);
+        }
+
+        .nav-link i {
+            width: 20px;
+            text-align: center;
+        }
+
+        /* Main Content Styles */
+        .main-content {
+            flex: 1;
+            margin-left: 260px;
+            padding: 20px;
+        }
+
+        .header {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header-left h1 {
+            font-size: 1.5rem;
+            color: var(--text-color);
+            margin-bottom: 5px;
+        }
+
+        .header-left p {
+            color: #666;
+            font-size: 0.9rem;
+        }
+
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .user-avatar {
+            width: 45px;
+            height: 45px;
+            background: var(--primary-color);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 1.2rem;
+        }
+
+        /* Filters Section */
+        .filters {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+
+        .filters-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .form-group label {
+            font-weight: 500;
+            color: var(--text-color);
+        }
+
+        .form-control {
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 0.95rem;
+            transition: all 0.3s ease;
+        }
+
+        .form-control:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(74, 144, 226, 0.1);
+        }
+
+        /* Attendance Table */
+        .attendance-panel {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .bulk-actions {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+
+        .attendance-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+
+        .attendance-table th,
+        .attendance-table td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+
+        .attendance-table th {
+            background-color: #f8f9fa;
+            font-weight: 600;
+            color: var(--text-color);
+        }
+
+        .attendance-table tr:hover {
+            background-color: #f8f9fa;
+        }
+
+        /* Radio Buttons */
+        .status-radio {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .radio-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border: 1px solid #ddd;
+            user-select: none;
+        }
+
+        .radio-label:hover {
+            background-color: #f8f9fa;
+        }
+
+        .radio-input {
+            display: none;
+        }
+
+        .radio-input:checked + .radio-label {
+            border-color: var(--primary-color);
+            background-color: #eef2ff;
+            font-weight: 500;
+        }
+
+        .radio-input:checked + .radio-label.status-hadir {
+            border-color: var(--success-color);
+            background-color: rgba(46, 204, 113, 0.1);
+        }
+
+        .radio-input:checked + .radio-label.status-sakit {
+            border-color: var(--warning-color);
+            background-color: rgba(241, 196, 15, 0.1);
+        }
+
+        .radio-input:checked + .radio-label.status-izin {
+            border-color: var(--info-color);
+            background-color: rgba(52, 152, 219, 0.1);
+        }
+
+        .radio-input:checked + .radio-label.status-alpa {
+            border-color: var(--danger-color);
+            background-color: rgba(231, 76, 60, 0.1);
+        }
+
+        /* Notes Input */
+        .notes-input {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            transition: all 0.3s ease;
+        }
+
+        .notes-input:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(74, 144, 226, 0.1);
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.3s ease;
+        }
+
+        .btn-primary {
+            background-color: var(--primary-color);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background-color: #357abd;
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            background-color: #f8f9fa;
+            color: var(--text-color);
+            border: 1px solid #ddd;
+        }
+
+        .btn-secondary:hover {
+            background-color: #e9ecef;
+            transform: translateY(-1px);
+        }
+
+        /* Alert Messages */
+        .alert {
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .alert-success {
+            background-color: rgba(46, 204, 113, 0.1);
+            color: var(--success-color);
+            border-left: 4px solid var(--success-color);
+        }
+
+        .alert-danger {
+            background-color: rgba(231, 76, 60, 0.1);
+            color: var(--danger-color);
+            border-left: 4px solid var(--danger-color);
+        }
+
+        @media (max-width: 768px) {
+            .sidebar {
+                display: none;
+            }
+
+            .main-content {
+                margin-left: 0;
+            }
+
+            .header {
+                flex-direction: column;
+                gap: 15px;
+            }
+
+            .filters-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .status-radio {
+                flex-direction: column;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="logo">
+            <i class="fas fa-school"></i>
+            <span>Sistem Absensi</span>
+        </div>
+        <ul class="nav-menu">
+            <li class="nav-item">
+                <a href="dashboard.php" class="nav-link">
+                    <i class="fas fa-tachometer-alt"></i>
+                    <span>Dashboard</span>
+                </a>
+            </li>
+            <li class="nav-item">
+                <a href="attendance.php" class="nav-link active">
+                    <i class="fas fa-clipboard-check"></i>
+                    <span>Absensi</span>
+                </a>
+            </li>
+            <li class="nav-item">
+                <a href="report.php" class="nav-link">
+                    <i class="fas fa-chart-bar"></i>
+                    <span>Laporan</span>
+                </a>
+            </li>
+            <?php if (isAdmin()): ?>
+            <li class="nav-item">
+                <a href="student_management.php" class="nav-link">
+                    <i class="fas fa-users"></i>
+                    <span>Data Siswa</span>
+                </a>
+            </li>
+            <li class="nav-item">
+                <a href="user_settings.php" class="nav-link">
+                    <i class="fas fa-cog"></i>
+                    <span>Pengaturan</span>
+                </a>
+            </li>
+            <?php endif; ?>
+            <li class="nav-item">
+                <a href="logout.php" class="nav-link">
+                    <i class="fas fa-sign-out-alt"></i>
+                    <span>Keluar</span>
+                </a>
+            </li>
+        </ul>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main-content">
+        <!-- Header -->
+        <div class="header">
+            <div class="header-left">
+                <h1>Pengisian Absensi</h1>
+                <p><?php echo formatDate($selected_date); ?></p>
+            </div>
+            <div class="user-info">
+                <div class="user-avatar">
+                    <?php echo strtoupper(substr($userName, 0, 1)); ?>
+                </div>
+                <div class="user-details">
+                    <h3><?php echo htmlspecialchars($userName); ?></h3>
+                    <p><?php echo $userRole === 'admin' ? 'Administrator' : 'Guru'; ?></p>
+                </div>
+            </div>
+        </div>
+
+        <?php if ($message): ?>
+            <div class="alert alert-success">
+                <i class="fas fa-check-circle"></i> <?php echo $message; ?>
+            </div>
+        <?php endif; ?>
+
+        <?php if ($error): ?>
+            <div class="alert alert-danger">
+                <i class="fas fa-exclamation-circle"></i> <?php echo $error; ?>
+            </div>
+        <?php endif; ?>
+
+        <!-- Filters -->
+        <div class="filters">
+            <form method="GET" class="filters-grid">
+                <div class="form-group">
+                    <label for="class">Kelas</label>
+                    <select name="class" id="class" class="form-control" onchange="this.form.submit()">
+                        <?php foreach ($classes as $class): ?>
+                            <option value="<?php echo $class['id']; ?>" 
+                                    <?php echo $selected_class == $class['id'] ? 'selected' : ''; ?>>
+                                <?php echo htmlspecialchars($class['class_name']); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="date">Tanggal</label>
+                    <input type="date" name="date" id="date" class="form-control" 
+                           value="<?php echo $selected_date; ?>" onchange="this.form.submit()">
+                </div>
+            </form>
+        </div>
+
+        <?php if ($selected_class && !empty($students)): ?>
+            <div class="attendance-panel">
+                <div class="bulk-actions">
+                    <button type="button" class="btn btn-primary" onclick="markAllPresent()">
+                        <i class="fas fa-check-double"></i> Semua Hadir
+                    </button>
+                    <button type="button" class="btn btn-secondary" onclick="resetAll()">
+                        <i class="fas fa-undo"></i> Reset
+                    </button>
+                </div>
+
+                <form method="POST" id="attendanceForm">
+                    <input type="hidden" name="save_attendance" value="1">
+                    
+                    <table class="attendance-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 100px;">NIS</th>
+                                <th>Nama Siswa</th>
+                                <th>Status Kehadiran</th>
+                                <th>Catatan</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php foreach ($students as $student): ?>
+                                <tr>
+                                    <td><?php echo htmlspecialchars($student['nis']); ?></td>
+                                    <td><?php echo htmlspecialchars($student['name']); ?></td>
+                                    <td>
+                                        <div class="status-radio">
+                                            <div class="status-option">
+                                                <input type="radio" name="attendance[<?php echo $student['id']; ?>]" 
+                                                       value="hadir" class="radio-input" id="hadir_<?php echo $student['id']; ?>"
+                                                       <?php echo $student['attendance_status'] === 'hadir' ? 'checked' : ''; ?>>
+                                                <label class="radio-label status-hadir" for="hadir_<?php echo $student['id']; ?>">
+                                                    <i class="fas fa-check"></i> Hadir
+                                                </label>
+                                            </div>
+
+                                            <div class="status-option">
+                                                <input type="radio" name="attendance[<?php echo $student['id']; ?>]" 
+                                                       value="sakit" class="radio-input" id="sakit_<?php echo $student['id']; ?>"
+                                                       <?php echo $student['attendance_status'] === 'sakit' ? 'checked' : ''; ?>>
+                                                <label class="radio-label status-sakit" for="sakit_<?php echo $student['id']; ?>">
+                                                    <i class="fas fa-procedures"></i> Sakit
+                                                </label>
+                                            </div>
+
+                                            <div class="status-option">
+                                                <input type="radio" name="attendance[<?php echo $student['id']; ?>]" 
+                                                       value="izin" class="radio-input" id="izin_<?php echo $student['id']; ?>"
+                                                       <?php echo $student['attendance_status'] === 'izin' ? 'checked' : ''; ?>>
+                                                <label class="radio-label status-izin" for="izin_<?php echo $student['id']; ?>">
+                                                    <i class="fas fa-envelope"></i> Izin
+                                                </label>
+                                            </div>
+
+                                            <div class="status-option">
+                                                <input type="radio" name="attendance[<?php echo $student['id']; ?>]" 
+                                                       value="alpa" class="radio-input" id="alpa_<?php echo $student['id']; ?>"
+                                                       <?php echo $student['attendance_status'] === 'alpa' ? 'checked' : ''; ?>>
+                                                <label class="radio-label status-alpa" for="alpa_<?php echo $student['id']; ?>">
+                                                    <i class="fas fa-times"></i> Alpa
+                                                </label>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <input type="text" name="notes[<?php echo $student['id']; ?>]" 
+                                               class="notes-input" placeholder="Tambahkan catatan..."
+                                               value="<?php echo htmlspecialchars($student['notes'] ?? ''); ?>">
+                                    </td>
+                                </tr>
+                            <?php endforeach; ?>
+                        </tbody>
+                    </table>
+
+                    <div style="text-align: right; margin-top: 20px;">
+                        <button type="submit" class="btn btn-primary" id="saveBtn">
+                            <i class="fas fa-save"></i> Simpan Absensi
+                        </button>
+                    </div>
+                </form>
+            </div>
+        <?php else: ?>
+            <div class="attendance-panel" style="text-align: center; padding: 40px;">
+                <i class="fas fa-info-circle" style="font-size: 3rem; color: var(--primary-color); margin-bottom: 20px;"></i>
+                <p>Tidak ada data siswa untuk kelas yang dipilih.</p>
+            </div>
+        <?php endif; ?>
+    </div>
+
+    <script>
+        // Bulk actions
+        function markAllPresent() {
+            if (confirm('Apakah Anda yakin ingin menandai semua siswa hadir?')) {
+                document.querySelectorAll('input[value="hadir"]').forEach(radio => {
+                    radio.checked = true;
+                });
+            }
+        }
+
+        function resetAll() {
+            if (confirm('Apakah Anda yakin ingin mereset semua status kehadiran?')) {
+                document.querySelectorAll('.radio-input').forEach(radio => {
+                    radio.checked = false;
+                });
+                document.querySelectorAll('.notes-input').forEach(input => {
+                    input.value = '';
+                });
+            }
+        }
+
+        // Form validation
+        document.getElementById('attendanceForm')?.addEventListener('submit', function(e) {
+            const unfilledStudents = [];
+            const rows = document.querySelectorAll('tbody tr');
+            
+            rows.forEach(row => {
+                const name = row.querySelector('td:nth-child(2)').textContent;
+                const radios = row.querySelectorAll('.radio-input');
+                const checked = Array.from(radios).some(radio => radio.checked);
+                
+                if (!checked) {
+                    unfilledStudents.push(name);
+                }
+            });
+            
+            if (unfilledStudents.length > 0) {
+                e.preventDefault();
+                alert(`Mohon isi status kehadiran untuk siswa berikut:\n${unfilledStudents.join('\n')}`);
+                return false;
+            }
+
+            // Show loading state
+            const saveBtn = document.getElementById('saveBtn');
+            saveBtn.disabled = true;
+            saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Menyimpan...';
+        });
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', function(e) {
+            if (document.activeElement.classList.contains('notes-input')) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    const currentRow = e.target.closest('tr');
+                    const nextRow = currentRow.nextElementSibling;
+                    if (nextRow) {
+                        nextRow.querySelector('.notes-input').focus();
+                    }
+                }
+                return;
+            }
+
+            const shortcuts = {
+                'h': 'hadir',
+                's': 'sakit',
+                'i': 'izin',
+                'a': 'alpa'
+            };
+
+            if (shortcuts[e.key.toLowerCase()]) {
+                const focused = document.querySelector('tr:focus-within');
+                if (focused) {
+                    const radio = focused.querySelector(`input[value="${shortcuts[e.key.toLowerCase()]}"]`);
+                    if (radio) {
+                        radio.checked = true;
+                    }
+                }
+            }
+        });
+    </script>
+</body>
+</html>
